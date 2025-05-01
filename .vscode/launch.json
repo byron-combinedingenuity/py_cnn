@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Tumor Classifier",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/tumor_cnn.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--data_dir",
+                "/mnt/d/work/datasets/breast_models_repository/processed_set_v2/output/masked_images/",
+                "--file_pattern", 
+                "*1.00GHz_imaginary_mask",
+                "--csv_file", 
+                "/mnt/d/work/datasets/breast_models_repository/exam_analysis_results.csv",
+                "--image_size", "224"
+            ]
+        }
+    ]
+}
