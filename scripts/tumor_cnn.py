@@ -303,7 +303,7 @@ def test(net, testloader, device):
 def main():
     # Hardcoded arguments for debugging
     data_dir = "/mnt/d/work/datasets/breast_models_repository/processed_set_v2/output/masked_images/"
-    file_pattern = "*_masked_magnitude_gray.png"
+    file_pattern = "_masked_magnitude_gray.png"
     csv_file = "/mnt/d/work/datasets/breast_models_repository/exam_analysis_results.csv"
     batch_size = 16
     num_epochs = 60
