@@ -307,7 +307,7 @@ def main():
     csv_file = "/mnt/d/work/datasets/breast_models_repository/exam_analysis_results.csv"
     batch_size = 16
     num_epochs = 60
-    learning_rate = 0.0002
+    learning_rate = 0.0001
     image_size = 224
     
     # Configuration
