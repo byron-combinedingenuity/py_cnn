@@ -305,7 +305,7 @@ def main():
     data_dir = "/mnt/d/work/datasets/breast_models_repository/processed_set_v2/output/masked_images/"
     file_pattern = "_masked_magnitude_gray.png"
     csv_file = "/mnt/d/work/datasets/breast_models_repository/exam_analysis_results.csv"
-    batch_size = 16
+    batch_size = 30
     num_epochs = 60
     learning_rate = 0.0001
     image_size = 224
