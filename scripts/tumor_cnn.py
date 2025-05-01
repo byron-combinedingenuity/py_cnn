@@ -24,33 +24,82 @@ class TumorDataset(Dataset):
         self.csv_file = csv_file
         
         # Get all matching files
-        self.image_paths = glob.glob(os.path.join(data_dir, file_pattern))
-        print(f"Found {len(self.image_paths)} files matching the pattern {file_pattern}")
+        self.file_paths = []
+        
+        # Handle file pattern correctly
+        if '*' in file_pattern:
+            # If pattern already has a wildcard, use it directly
+            self.file_paths.extend(glob.glob(os.path.join(data_dir, f"{file_pattern}")))
+        else:
+            # Add wildcards around the pattern if needed
+            self.file_paths.extend(glob.glob(os.path.join(data_dir, f"*{file_pattern}*")))
+            
+            # Handle .npy files if no extension in pattern
+            if '.' not in file_pattern:
+                # Try with common image extensions
+                image_extensions = ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.npy']
+                for ext in image_extensions:
+                    self.file_paths.extend(glob.glob(os.path.join(data_dir, f"*{file_pattern}*{ext}")))
+        
+        print(f"Found {len(self.file_paths)} files matching the pattern {file_pattern}")
         
         # Load CSV for labels
         self.df = pd.read_csv(csv_file)
         
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.file_paths)  # Changed from self.image_paths to self.file_paths
     
     def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
+        file_path = self.file_paths[idx]  # Changed from self.image_paths to self.file_paths
         
         # Get exam and slice numbers from filename using regex
-        # Format: examX_sliceY_region_A_B_C_D_masked_magnitude_gray.png
-        filename = os.path.basename(img_path)
-        match = re.match(r'exam(\d+)_slice(\d+)_', filename)
+        filename = os.path.basename(file_path)
         
-        if match:
-            exam_num = int(match.group(1))
-            slice_num = int(match.group(2))
+        # Use regex to extract exam and slice numbers
+        exam_match = re.search(r'exam(\d+)', filename)
+        slice_match = re.search(r'slice(\d+)', filename)
+        
+        if exam_match and slice_match:
+            exam_num = int(exam_match.group(1))
+            slice_num = int(slice_match.group(1))
         else:
-            print(f"Error parsing filename: {filename}. Using default values.")
+            print(f"Error parsing filename: {filename}. Could not extract exam/slice numbers.")
             exam_num = 0
             slice_num = 0
         
-        # Load image
-        image = Image.open(img_path).convert('RGB')
+        # Load file based on extension
+        if file_path.endswith('.npy'):
+            # Load NumPy array
+            image_array = np.load(file_path)
+            
+            # Normalize the array to 0-255 range if needed
+            if image_array.max() > 1 and image_array.max() <= 255:
+                # Already in 0-255 range
+                pass
+            elif image_array.max() <= 1.0:
+                # Scale from 0-1 to 0-255
+                image_array = (image_array * 255).astype(np.uint8)
+            else:
+                # Scale arbitrary range to 0-255
+                image_array = ((image_array - image_array.min()) / 
+                            (image_array.max() - image_array.min()) * 255).astype(np.uint8)
+            
+            # Convert to PIL Image
+            if len(image_array.shape) == 2:  # Grayscale
+                image = Image.fromarray(image_array, mode='L')
+                # Convert to RGB (3 channels)
+                image = image.convert('RGB')
+            elif len(image_array.shape) == 3 and image_array.shape[2] == 3:  # RGB
+                image = Image.fromarray(image_array)
+            else:
+                raise ValueError(f"Unsupported array shape: {image_array.shape}")
+        else:
+            # Load image file
+            image = Image.open(file_path)  # Changed from img_path to file_path
+            
+            # Convert to RGB if grayscale
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
         
         if self.transform:
             image = self.transform(image)
@@ -257,8 +306,8 @@ def main():
     file_pattern = "*_masked_magnitude_gray.png"
     csv_file = "/mnt/d/work/datasets/breast_models_repository/exam_analysis_results.csv"
     batch_size = 16
-    num_epochs = 30
-    learning_rate = 0.0001
+    num_epochs = 60
+    learning_rate = 0.0002
     image_size = 224
     
     # Configuration
