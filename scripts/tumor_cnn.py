@@ -304,10 +304,11 @@ def main():
     # Hardcoded arguments for debugging
     data_dir = "/mnt/d/work/datasets/breast_models_repository/processed_set_v2/output/masked_images/"
     file_pattern = "_masked_magnitude_gray.png"
+    # file_pattern = "*_1.00*"
     csv_file = "/mnt/d/work/datasets/breast_models_repository/exam_analysis_results.csv"
-    batch_size = 30
-    num_epochs = 60
-    learning_rate = 0.0001
+    batch_size = 22
+    num_epochs = 40
+    learning_rate = 0.00011
     image_size = 224
     
     # Configuration
