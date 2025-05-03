@@ -231,33 +231,38 @@ class MultiFrequencyTumorDataset(Dataset):
         return multi_channel_image, label, (exam_num, slice_num)
 
 
+# In FocalLoss, adjust alpha more aggressively
 class FocalLoss(nn.Module):
-    """Focal Loss for addressing class imbalance more effectively."""
-    
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean', pos_weight=None):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
+        self.pos_weight = pos_weight  # Add pos_weight support
         
     def forward(self, inputs, targets):
-        # Binary case
-        BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        if self.pos_weight is not None:
+            BCE_loss = F.binary_cross_entropy_with_logits(
+                inputs, targets, reduction='none', pos_weight=self.pos_weight)
+        else:
+            BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
         
-        pt = torch.exp(-BCE_loss)  # prevents nans when probability 0
-        loss = self.alpha * (1-pt)**self.gamma * BCE_loss
+        pt = torch.exp(-BCE_loss)
+        
+        # Apply different alphas for positive and negative classes
+        at = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        focal_loss = at * (1-pt)**self.gamma * BCE_loss
         
         if self.reduction == 'mean':
-            return loss.mean()
+            return focal_loss.mean()
         elif self.reduction == 'sum':
-            return loss.sum()
+            return focal_loss.sum()
         else:
-            return loss
+            return focal_loss
 
 
 class ImprovedTumorClassifier(nn.Module):
-    """Improved CNN architecture optimized for complex RF imaging data."""
-    
     def __init__(self, in_channels=4, dropout_rate=0.4):
         super(ImprovedTumorClassifier, self).__init__()
         
@@ -303,6 +308,12 @@ class ImprovedTumorClassifier(nn.Module):
         self.res_conv2 = nn.Conv2d(32, 64, kernel_size=1)
         self.res_conv3 = nn.Conv2d(64, 128, kernel_size=1)
         self.res_conv4 = nn.Conv2d(128, 256, kernel_size=1)
+
+        # Add SE blocks after conv blocks
+        self.se1 = SEBlock(32)
+        self.se2 = SEBlock(64)
+        self.se3 = SEBlock(128)
+        self.se4 = SEBlock(256)
         
         # Global pooling with multiple pooling types
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
@@ -336,6 +347,7 @@ class ImprovedTumorClassifier(nn.Module):
         identity1 = self.res_conv1(x)
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
+        x = self.se1(x)  # Add SE block
         if self.use_residual:
             x = x + identity1
         x = self.pool1(x)
@@ -343,9 +355,10 @@ class ImprovedTumorClassifier(nn.Module):
         
         # Second block with residual connection
         identity2 = self.res_conv2(x)
-        identity2 = F.avg_pool2d(identity2, 2)  # Match spatial size after pooling
+        identity2 = F.avg_pool2d(identity2, 2)
         x = F.relu(self.bn3(self.conv3(x)))
         x = F.relu(self.bn4(self.conv4(x)))
+        x = self.se2(x)  # Add SE block
         x = self.pool2(x)
         if self.use_residual:
             x = x + identity2
@@ -353,9 +366,10 @@ class ImprovedTumorClassifier(nn.Module):
         
         # Third block with residual connection  
         identity3 = self.res_conv3(x)
-        identity3 = F.avg_pool2d(identity3, 2)  # Match spatial size after pooling
+        identity3 = F.avg_pool2d(identity3, 2)
         x = F.relu(self.bn5(self.conv5(x)))
         x = F.relu(self.bn6(self.conv6(x)))
+        x = self.se3(x)  # Add SE block
         x = self.pool3(x)
         if self.use_residual:
             x = x + identity3
@@ -363,9 +377,10 @@ class ImprovedTumorClassifier(nn.Module):
         
         # Fourth block with residual connection
         identity4 = self.res_conv4(x)
-        identity4 = F.avg_pool2d(identity4, 2)  # Match spatial size after pooling
+        identity4 = F.avg_pool2d(identity4, 2)
         x = F.relu(self.bn7(self.conv7(x)))
         x = F.relu(self.bn8(self.conv8(x)))
+        x = self.se4(x)  # Add SE block
         x = self.pool4(x)
         if self.use_residual:
             x = x + identity4
@@ -401,8 +416,8 @@ class ImprovedTumorClassifier(nn.Module):
         return x.squeeze()
 
 
-def train_epoch(net, trainloader, optimizer, criterion, device):
-    """Training function for one epoch with improved logging."""
+def train_epoch(net, trainloader, optimizer, criterion, device, warmup_scheduler=None):
+    """Training function for one epoch with improved logging and debugging."""
     net.train()
     running_loss = 0.0
     correct = 0
@@ -412,16 +427,32 @@ def train_epoch(net, trainloader, optimizer, criterion, device):
     true_negatives = 0
     false_negatives = 0
     
+    # Debug tracking
+    all_outputs = []
+    all_labels = []
+    all_predictions = []
+    
     for i, data in enumerate(trainloader, 0):
         inputs, labels, _ = data
         inputs, labels = inputs.to(device), labels.to(device).float()
         
         optimizer.zero_grad()
         
-        outputs = net(inputs)
-        loss = criterion(outputs, labels)
+        if np.random.random() < 0.5:  # 50% chance of using mixup
+            inputs, labels_a, labels_b, lam = mixup_data(inputs, labels, alpha=0.2)
+            outputs = net(inputs)
+            loss = mixup_criterion(criterion, outputs, labels_a, labels_b, lam)
+        else:
+            outputs = net(inputs)
+            loss = criterion(outputs, labels)
+        
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)  # Gradient clipping
         optimizer.step()
+        
+        # Step the warmup scheduler if provided
+        if warmup_scheduler is not None:
+            warmup_scheduler.step()
         
         running_loss += loss.item()
         
@@ -435,6 +466,11 @@ def train_epoch(net, trainloader, optimizer, criterion, device):
         false_positives += ((predicted == 1) & (labels == 0)).sum().item()
         true_negatives += ((predicted == 0) & (labels == 0)).sum().item()
         false_negatives += ((predicted == 0) & (labels == 1)).sum().item()
+        
+        # Store for debugging
+        all_outputs.extend(outputs.detach().cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        all_predictions.extend(predicted.cpu().numpy())
         
         if i % 10 == 9:
             # Calculate current metrics
@@ -453,9 +489,47 @@ def train_epoch(net, trainloader, optimizer, criterion, device):
     sensitivity = 100 * true_positives / max(1, (true_positives + false_negatives))
     specificity = 100 * true_negatives / max(1, (true_negatives + false_positives))
     
+    # Debug: Check if model is predicting all one class
+    all_outputs = np.array(all_outputs)
+    all_predictions = np.array(all_predictions)
+    all_labels = np.array(all_labels)
+    
+    if len(np.unique(all_predictions)) == 1:
+        print(f"WARNING: Model is predicting all samples as class {int(all_predictions[0])}")
+        print(f"Output range: [{all_outputs.min():.4f}, {all_outputs.max():.4f}]")
+        print(f"Output mean: {all_outputs.mean():.4f}")
+        print(f"Output std: {all_outputs.std():.4f}")
+    
     return accuracy, sensitivity, specificity
 
-
+class ProgressiveAugmentation:
+    def __init__(self, max_epochs, initial_strength=0.1, final_strength=0.5, image_size=256):
+        self.max_epochs = max_epochs
+        self.initial_strength = initial_strength
+        self.final_strength = final_strength
+        self.image_size = image_size
+    
+    def get_transforms(self, epoch):
+        strength = self.initial_strength + (self.final_strength - self.initial_strength) * (epoch / self.max_epochs)
+        
+        return transforms.Compose([
+            transforms.Resize((self.image_size, self.image_size)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),
+            transforms.RandomRotation(degrees=int(20 * strength)),
+            transforms.RandomAffine(
+                degrees=0, 
+                translate=(0.05 * strength, 0.05 * strength), 
+                scale=(1-0.05*strength, 1+0.05*strength), 
+                shear=5 * strength
+            ),
+            transforms.ColorJitter(
+                brightness=0.2 * strength, 
+                contrast=0.2 * strength
+            ),
+            transforms.ToTensor(),
+        ])
+    
 def validate(net, valloader, criterion, device):
     """Validation function with comprehensive metrics."""
     net.eval()
@@ -539,8 +613,12 @@ def test(net, testloader, device):
             
             # Track misclassified samples
             misclassified_indices = (predicted != labels).cpu().numpy()
-            misclassified_metadata = [metadata[i] for i, is_error in enumerate(misclassified_indices) if is_error]
-            exam_slice_errors.extend(misclassified_metadata)
+            
+            # FIXED: Handle metadata correctly - it's a tuple of tuples
+            for i, is_error in enumerate(misclassified_indices):
+                if is_error:
+                    exam_num, slice_num = metadata[0][i].item(), metadata[1][i].item()
+                    exam_slice_errors.append((exam_num, slice_num))
             
             # Update confusion matrix
             true_positives += ((predicted == 1) & (labels == 1)).sum().item()
@@ -596,6 +674,91 @@ def test(net, testloader, device):
     
     return accuracy, np.array(all_labels), np.array(all_predictions), (sensitivity, specificity, auroc, auprc)
 
+def init_weights(m):
+    if isinstance(m, nn.Conv2d):
+        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)
+    elif isinstance(m, nn.BatchNorm2d):
+        nn.init.constant_(m.weight, 1)
+        nn.init.constant_(m.bias, 0)
+    elif isinstance(m, nn.Linear):
+        # More careful initialization for linear layers
+        if m.out_features == 1:  # Final layer
+            # Initialize final layer with smaller weights to prevent saturation
+            nn.init.normal_(m.weight, mean=0, std=0.01)
+            if m.bias is not None:
+                # Initialize bias based on class ratio
+                # This helps prevent the model from defaulting to all positive predictions
+                nn.init.constant_(m.bias, -0.5)  # Slight bias towards negative class
+        else:
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+# Create a warmup scheduler
+def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        return max(0.0, float(num_training_steps - current_step) / 
+                   float(max(1, num_training_steps - num_warmup_steps)))
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+def mixup_data(x, y, alpha=1.0):
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).to(x.device)
+
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+class EarlyStopping:
+    def __init__(self, patience=10, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        
+    def __call__(self, val_score):
+        score = val_score
+        
+        if self.best_score is None:
+            self.best_score = score
+        elif score < self.best_score + self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.counter = 0
+
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super(SEBlock, self).__init__()
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.excitation = nn.Sequential(
+            nn.Linear(channels, channels // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.squeeze(x).view(b, c)
+        y = self.excitation(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
 
 def main():
     # Parse command line arguments
@@ -613,10 +776,10 @@ def main():
     parser.add_argument('--output_dir', type=str, default='./', help='Directory to save output files')
     parser.add_argument('--min_patterns', type=int, default=None, 
                        help='Minimum number of patterns required per sample (default: all)')
+    parser.add_argument('--debug_mode', action='store_true', help='Enable debugging mode')
     
     args = parser.parse_args()
     
-       
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -624,14 +787,12 @@ def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Data augmentation for training - enhanced for medical images
-    transform_train = transforms.Compose([
+    # Create progressive augmentation
+    prog_aug = ProgressiveAugmentation(args.num_epochs, image_size=args.image_size)
+    
+    # Initial transform for dataset creation
+    transform_initial = transforms.Compose([
         transforms.Resize((args.image_size, args.image_size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
-        transforms.RandomRotation(20),
-        transforms.RandomAffine(degrees=0, translate=(0.05, 0.05), scale=(0.95, 1.05), shear=5),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
         transforms.ToTensor(),
     ])
     
@@ -647,7 +808,7 @@ def main():
         args.data_dir, 
         args.file_patterns, 
         args.csv_file, 
-        transform=transform_train,
+        transform=transform_initial,
         min_patterns_required=args.min_patterns
     )    
     
@@ -658,26 +819,17 @@ def main():
     
     print(f"Class distribution - Not Malignant: {label_counts[0]}, Malignant: {label_counts[1]}")
     
-    # Set class weights
+    # Adjust class weight calculation to be less aggressive
     class_weight = None
     if label_counts[1] > 0:
-        # Calculate based on inverse class frequency
-        class_weight = label_counts[0] / label_counts[1]
-        print(f"Automatically calculated class weight for malignant: {class_weight:.2f}")
-    
-    # Calculate sample weights for weighted random sampler
-    sample_weights = []
-    for _, label, _ in full_dataset:
-        # Higher weight for minority class
-        weight = 1.0 if label == 0 else class_weight
-        sample_weights.append(weight)
-    
-    # Create weighted sampler to address class imbalance
-    sampler = WeightedRandomSampler(
-        weights=sample_weights, 
-        num_samples=len(sample_weights), 
-        replacement=True
-    )
+        # Use more conservative weighting for severe imbalance
+        ratio = label_counts[0] / label_counts[1]
+        if ratio > 3:  # Severe imbalance
+            class_weight = min(2.0, np.log1p(ratio))  # Cap the weight at 2.0
+        else:
+            class_weight = np.sqrt(ratio)
+        print(f"Class ratio (majority/minority): {ratio:.2f}")
+        print(f"Adjusted class weight for malignant: {class_weight:.2f}")
     
     # Split dataset FIRST
     dataset_size = len(full_dataset)
@@ -693,7 +845,7 @@ def main():
     train_sample_weights = []
     for idx in trainset.indices:
         _, label, _ = full_dataset[idx]  
-        # Higher weight for minority class
+        # Moderate weight for minority class
         weight = 1.0 if label == 0 else class_weight
         train_sample_weights.append(weight)
     
@@ -722,43 +874,62 @@ def main():
     print(f"Validation set size: {len(valset)}")
     print(f"Test set size: {len(testset)}")
     
-    # Count the actual number of input channels (with complex data creating 2 channels)
-    # Count how many complex patterns we have
-    complex_patterns = []
-    for pattern in args.file_patterns:
-        if 'complex' in pattern.lower():
-            complex_patterns.append(pattern)
-
-    # Calculate total number of channels
     # Count the actual number of input channels
-    # We need to check the actual data type, not just the filename
     sample_data, _, _ = full_dataset[0]  # Get a sample to check actual channels
     num_channels = sample_data.shape[0]  # Use actual channels from data
-
+    
     print(f"Detected actual input channels: {num_channels}")
-
-    print(f"Total input channels: {num_channels} ({len(complex_patterns)} complex patterns, {len(args.file_patterns) - len(complex_patterns)} real patterns)")
-
+    
     # Create the network with the correct number of input channels
     net = ImprovedTumorClassifier(in_channels=num_channels, dropout_rate=args.dropout_rate)
+    net.apply(init_weights)  # Apply proper initialization
     net.to(device)
     
-    # Define loss function - use Focal Loss for better handling of class imbalance
-    criterion = FocalLoss(alpha=0.75, gamma=2.0)
+    # Create loss with moderated weighting  
+    pos_weight = torch.tensor([class_weight]).to(device)  # Use moderated class weight
     
-    # Define optimizer with higher weight decay for regularization
-    optimizer = optim.AdamW(
-        net.parameters(), 
-        lr=args.learning_rate, 
-        weight_decay=args.weight_decay,
-        amsgrad=True
-    )
+    # Adjust loss function based on imbalance severity
+    if args.debug_mode:
+        print("Debug mode: Using BCEWithLogitsLoss for simpler debugging")
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    else:
+        # Adjust FocalLoss parameters to be less aggressive
+        criterion = FocalLoss(alpha=0.65, gamma=0.5, pos_weight=pos_weight)  # More conservative parameters
+    
+    # Define optimizer with lower initial learning rate
+    if args.debug_mode:
+        # Use SGD with momentum for debugging (often more stable than Adam)
+        optimizer = optim.SGD(
+            net.parameters(),
+            lr=args.learning_rate * 0.1,  # Much lower learning rate for SGD
+            momentum=0.9,
+            weight_decay=args.weight_decay
+        )
+    else:
+        optimizer = optim.AdamW(
+            net.parameters(), 
+            lr=args.learning_rate * 0.5,  # Reduce learning rate
+            weight_decay=args.weight_decay,
+            amsgrad=True
+        )
+    
+    # Setup warmup scheduler
+    num_epochs = args.num_epochs
+    steps_per_epoch = len(trainloader)
+    total_steps = num_epochs * steps_per_epoch
+    warmup_steps = steps_per_epoch * 2  # 2 epochs of warmup
+    
+    warmup_scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
     
     # Learning rate scheduler with patience
     scheduler = ReduceLROnPlateau(
         optimizer, mode='max', factor=0.5, patience=5, 
         verbose=True, min_lr=1e-6
     )
+    
+    # Initialize early stopping
+    early_stopping = EarlyStopping(patience=15, min_delta=0.001)
     
     # Lists to store metrics
     train_metrics_history = []
@@ -767,15 +938,25 @@ def main():
     # Training loop
     best_val_metric = 0  # Using a combined metric of sensitivity and specificity
     best_val_loss = float('inf')
-    epochs_without_improvement = 0
-    patience = 10  # Extended early stopping patience
     
     for epoch in range(args.num_epochs):
         print(f'Epoch {epoch+1}/{args.num_epochs}')
         
-        # Train
-        train_acc, train_sens, train_spec = train_epoch(net, trainloader, optimizer, criterion, device)
+        # Update augmentation for this epoch
+        trainset.dataset.transform = prog_aug.get_transforms(epoch)
+        
+        # Train with warmup scheduler
+        train_acc, train_sens, train_spec = train_epoch(
+            net, trainloader, optimizer, criterion, device, warmup_scheduler)
         train_metrics_history.append((train_acc, train_sens, train_spec))
+        
+        # Debug mode: analyze predictions after each epoch
+        if args.debug_mode and epoch % 5 == 0:
+            print("\n=== Debug Analysis ===")
+            from debug_predictions import debug_model_predictions, analyze_batch_predictions
+            debug_model_predictions(net, valloader, device, os.path.join(args.output_dir, 'debug'))
+            analyze_batch_predictions(net, valloader, device, os.path.join(args.output_dir, 'debug'))
+            print("=====================\n")
         
         # Validate
         val_loss, val_acc, val_sens, val_spec, val_auroc, val_auprc = validate(net, valloader, criterion, device)
@@ -783,6 +964,10 @@ def main():
         
         # Combined validation metric - balanced accuracy (average of sensitivity and specificity)
         val_metric = (val_sens + val_spec) / 2
+        
+        # Check early stopping with composite metric
+        composite_metric = 0.3 * val_acc + 0.4 * val_sens + 0.3 * val_spec
+        early_stopping(composite_metric)
         
         print(f'Train Acc: {train_acc:.2f}%, Sens: {train_sens:.2f}%, Spec: {train_spec:.2f}%')
         print(f'Val Acc: {val_acc:.2f}%, Sens: {val_sens:.2f}%, Spec: {val_spec:.2f}%')
@@ -796,18 +981,9 @@ def main():
             best_val_metric = val_metric
             torch.save(net.state_dict(), os.path.join(args.output_dir, 'tumor_best_model.pth'))
             print(f'New best model saved with validation metric: {val_metric:.2f}%')
-            epochs_without_improvement = 0
-        elif val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(net.state_dict(), os.path.join(args.output_dir, 'tumor_best_loss_model.pth'))
-            print(f'New best model saved with validation loss: {val_loss:.4f}')
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-            
-        # Early stopping
-        if epochs_without_improvement >= patience:
-            print(f'Early stopping triggered after {epoch+1} epochs without improvement')
+        
+        if early_stopping.early_stop:
+            print(f"Early stopping triggered after {epoch+1} epochs")
             break
     
     print('Finished Training')
@@ -816,7 +992,7 @@ def main():
     net.load_state_dict(torch.load(os.path.join(args.output_dir, 'tumor_best_model.pth')))
     
     # Test the model
-    test_acc, all_labels, all_predictions, (test_sens, test_spec, test_auroc, test_auprc) = test(testloader, device)
+    test_acc, all_labels, all_predictions, (test_sens, test_spec, test_auroc, test_auprc) = test(net, testloader, device)
     
     print(f'Final test metrics:')
     print(f'Accuracy: {test_acc:.2f}%')

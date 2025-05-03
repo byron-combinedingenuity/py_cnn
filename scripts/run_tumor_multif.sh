@@ -63,17 +63,18 @@ CSV_FILE="/mnt/d/work/datasets/breast_models_repository/exam_analysis_results.cs
 
 echo "Starting model training with all frequency data..."
 
-# Run the improved CNN with all available frequency data
+# Run the improved CNN with all available frequency data in debug mode
 python3 scripts/tumor_cnn_multif.py \
   --data_dir "$DATA_DIR" \
   --file_patterns "${FILE_PATTERNS[@]}" \
   --csv_file "$CSV_FILE" \
   --batch_size 8 \
-  --num_epochs 100 \
+  --num_epochs 20 \
   --learning_rate 0.00005 \
   --image_size 256 \
   --weight_decay 5e-5 \
   --dropout_rate 0.5 \
-  --output_dir "$OUTPUT_DIR"
+  --output_dir "$OUTPUT_DIR" \
+  --debug_mode
 
 echo "Training completed. Results saved to $OUTPUT_DIR"
