@@ -706,7 +706,7 @@ def main():
     
     # Create data loaders - using weighted sampler for training
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=args.batch_size, sampler=train_sampler, num_workers=2
+        trainset, batch_size=args.batch_size, sampler=train_sampler, num_workers=2, drop_last=True
     )
     
     valloader = torch.utils.data.DataLoader(
