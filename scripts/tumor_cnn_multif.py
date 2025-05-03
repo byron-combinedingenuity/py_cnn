@@ -140,38 +140,23 @@ class MultiFrequencyTumorDataset(Dataset):
                     else:
                         imag_part = np.zeros_like(imag_part, dtype=np.uint8)
                     
-                    # Calculate magnitude and phase
-                    magnitude = np.abs(image_array)
-                    phase = np.angle(image_array)
+                    # Create PIL images for both components
+                    real_image = Image.fromarray(real_part, mode='L')
+                    imag_image = Image.fromarray(imag_part, mode='L')
                     
-                    # Normalize magnitude
-                    if magnitude.max() != magnitude.min():
-                        magnitude = ((magnitude - magnitude.min()) / 
-                                    (magnitude.max() - magnitude.min()) * 255).astype(np.uint8)
-                    else:
-                        magnitude = np.zeros_like(magnitude, dtype=np.uint8)
+                    # Apply transform if specified
+                    if self.transform:
+                        real_image = self.transform(real_image)
+                        imag_image = self.transform(imag_image)
                     
-                    # Normalize phase to 0-255 (from -π to π)
-                    phase = ((phase + np.pi) / (2 * np.pi) * 255).astype(np.uint8)
-                    
-                    # Create a multi-channel image with real, imaginary, magnitude, and phase
-                    # Use just one or two components based on the filename pattern
-                    if 'magnitude' in file_path.lower() or 'mag' in file_path.lower():
-                        image = Image.fromarray(magnitude, mode='L')
-                    elif 'phase' in file_path.lower():
-                        image = Image.fromarray(phase, mode='L')
-                    elif 'imaginary' in file_path.lower() or 'imag' in file_path.lower():
-                        image = Image.fromarray(imag_part, mode='L')
-                    elif 'real' in file_path.lower():
-                        image = Image.fromarray(real_part, mode='L')
-                    else:
-                        # Default: create grayscale image from magnitude
-                        image = Image.fromarray(magnitude, mode='L')
+                    # Add both real and imaginary components
+                    multi_freq_images.append(real_image)
+                    multi_freq_images.append(imag_image)
                     
                     # Print info about complex data handling
                     if pattern_idx == 0 and idx < 2:  # Only print for first few samples
                         print(f"Complex data detected in {os.path.basename(file_path)}. "
-                              f"Using {'magnitude' if 'magnitude' in file_path.lower() else 'phase' if 'phase' in file_path.lower() else 'imaginary' if 'imaginary' in file_path.lower() else 'real' if 'real' in file_path.lower() else 'magnitude'} component.")
+                            f"Using both real and imaginary components.")
                 else:
                     # For non-complex data, handle as before
                     # Normalize the array to 0-255 range if needed
@@ -196,21 +181,28 @@ class MultiFrequencyTumorDataset(Dataset):
                         image = Image.fromarray(image_array)
                     else:
                         raise ValueError(f"Unsupported array shape: {image_array.shape}")
+                    
+                    # Apply transform if specified
+                    if self.transform:
+                        image = self.transform(image)
+                    
+                    # Add the image to our list
+                    multi_freq_images.append(image)
             else:
                 # Load image file
                 image = Image.open(file_path)
                 
-            # Ensure image is grayscale (single channel) for multi-channel stacking
-            if image.mode == 'RGB':
-                # Convert to grayscale using luminosity method
-                image = image.convert('L')
-            
-            # Apply transform if specified
-            if self.transform:
-                image = self.transform(image)
-            
-            # Add the image to our list
-            multi_freq_images.append(image)
+                # Ensure image is grayscale (single channel) for multi-channel stacking
+                if image.mode == 'RGB':
+                    # Convert to grayscale using luminosity method
+                    image = image.convert('L')
+                
+                # Apply transform if specified
+                if self.transform:
+                    image = self.transform(image)
+                
+                # Add the image to our list
+                multi_freq_images.append(image)
         
         # Stack multiple frequencies as channels
         if torch.is_tensor(multi_freq_images[0]):
@@ -308,9 +300,9 @@ class ImprovedTumorClassifier(nn.Module):
         # Add residual connections for stable training
         self.use_residual = True
         self.res_conv1 = nn.Conv2d(in_channels, 32, kernel_size=1)
-        self.res_conv2 = nn.Conv2d(32, 64, kernel_size=1, stride=2)
-        self.res_conv3 = nn.Conv2d(64, 128, kernel_size=1, stride=2)
-        self.res_conv4 = nn.Conv2d(128, 256, kernel_size=1, stride=2)
+        self.res_conv2 = nn.Conv2d(32, 64, kernel_size=1)
+        self.res_conv3 = nn.Conv2d(64, 128, kernel_size=1)
+        self.res_conv4 = nn.Conv2d(128, 256, kernel_size=1)
         
         # Global pooling with multiple pooling types
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
@@ -351,29 +343,32 @@ class ImprovedTumorClassifier(nn.Module):
         
         # Second block with residual connection
         identity2 = self.res_conv2(x)
+        identity2 = F.avg_pool2d(identity2, 2)  # Match spatial size after pooling
         x = F.relu(self.bn3(self.conv3(x)))
         x = F.relu(self.bn4(self.conv4(x)))
+        x = self.pool2(x)
         if self.use_residual:
             x = x + identity2
-        x = self.pool2(x)
         x = self.dropout2(x)
         
-        # Third block with residual connection
+        # Third block with residual connection  
         identity3 = self.res_conv3(x)
+        identity3 = F.avg_pool2d(identity3, 2)  # Match spatial size after pooling
         x = F.relu(self.bn5(self.conv5(x)))
         x = F.relu(self.bn6(self.conv6(x)))
+        x = self.pool3(x)
         if self.use_residual:
             x = x + identity3
-        x = self.pool3(x)
         x = self.dropout3(x)
         
         # Fourth block with residual connection
         identity4 = self.res_conv4(x)
+        identity4 = F.avg_pool2d(identity4, 2)  # Match spatial size after pooling
         x = F.relu(self.bn7(self.conv7(x)))
         x = F.relu(self.bn8(self.conv8(x)))
+        x = self.pool4(x)
         if self.use_residual:
             x = x + identity4
-        x = self.pool4(x)
         x = self.dropout4(x)
         
         # Parallel global pooling (captures different statistics)
@@ -684,7 +679,7 @@ def main():
         replacement=True
     )
     
-    # Split dataset
+    # Split dataset FIRST
     dataset_size = len(full_dataset)
     train_size = int(0.7 * dataset_size)
     val_size = int(0.15 * dataset_size)
@@ -694,9 +689,24 @@ def main():
     trainset, valset, testset = torch.utils.data.random_split(
         full_dataset, [train_size, val_size, test_size], generator=generator)
     
+    # Calculate sample weights for the TRAINING set only
+    train_sample_weights = []
+    for idx in trainset.indices:
+        _, label, _ = full_dataset[idx]  
+        # Higher weight for minority class
+        weight = 1.0 if label == 0 else class_weight
+        train_sample_weights.append(weight)
+    
+    # Create weighted sampler for the training set
+    train_sampler = WeightedRandomSampler(
+        weights=train_sample_weights, 
+        num_samples=len(train_sample_weights), 
+        replacement=True
+    )
+    
     # Create data loaders - using weighted sampler for training
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=args.batch_size, sampler=sampler, num_workers=2
+        trainset, batch_size=args.batch_size, sampler=train_sampler, num_workers=2
     )
     
     valloader = torch.utils.data.DataLoader(
@@ -712,8 +722,21 @@ def main():
     print(f"Validation set size: {len(valset)}")
     print(f"Test set size: {len(testset)}")
     
-    # Create the network with the number of input channels equal to number of frequency patterns
-    net = ImprovedTumorClassifier(in_channels=len(args.file_patterns), dropout_rate=args.dropout_rate)
+    # Count the actual number of input channels (with complex data creating 2 channels)
+    # Count how many complex patterns we have
+    complex_patterns = []
+    for pattern in args.file_patterns:
+        if 'complex' in pattern.lower():
+            complex_patterns.append(pattern)
+
+    # Calculate total number of channels
+    # Complex patterns contribute 2 channels (real + imaginary), others contribute 1
+    num_channels = len(args.file_patterns) - len(complex_patterns) + 2 * len(complex_patterns)
+
+    print(f"Total input channels: {num_channels} ({len(complex_patterns)} complex patterns, {len(args.file_patterns) - len(complex_patterns)} real patterns)")
+
+    # Create the network with the correct number of input channels
+    net = ImprovedTumorClassifier(in_channels=num_channels, dropout_rate=args.dropout_rate)
     net.to(device)
     
     # Define loss function - use Focal Loss for better handling of class imbalance
