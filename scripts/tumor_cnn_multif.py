@@ -730,8 +730,12 @@ def main():
             complex_patterns.append(pattern)
 
     # Calculate total number of channels
-    # Complex patterns contribute 2 channels (real + imaginary), others contribute 1
-    num_channels = len(args.file_patterns) - len(complex_patterns) + 2 * len(complex_patterns)
+    # Count the actual number of input channels
+    # We need to check the actual data type, not just the filename
+    sample_data, _, _ = full_dataset[0]  # Get a sample to check actual channels
+    num_channels = sample_data.shape[0]  # Use actual channels from data
+
+    print(f"Detected actual input channels: {num_channels}")
 
     print(f"Total input channels: {num_channels} ({len(complex_patterns)} complex patterns, {len(args.file_patterns) - len(complex_patterns)} real patterns)")
 
